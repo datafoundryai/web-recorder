@@ -1,3 +1,11 @@
-Metadata-Version: 2.2
+Metadata-Version: 2.4
 Name: web_recorder
 Version: 0.0.1
+Summary: A package for recording, storing, and replaying web interactions
+Author: Pranav Raja
+Author-email: pranavraja99@gmail.com
+License-File: LICENSE
+Dynamic: author
+Dynamic: author-email
+Dynamic: license-file
+Dynamic: summary
