@@ -1,13 +1,11 @@
 import asyncio
-import uuid
-import json
-from playwright.async_api import async_playwright, Page, ConsoleMessage, Browser
 import os
+import uuid
+from playwright.async_api import async_playwright
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import boto3
 
-from scrapybara import Scrapybara
 from web_recorder.replayer import replay_events
 from web_recorder.utils import get_js_path
 
@@ -30,29 +28,22 @@ no_automation_args = [
 ]
 
 
-
-def parse_logs(log: ConsoleMessage):
-    print("recording browser logs", log)
-
-    log = log.text
-
-    # if log.startswith("<session_event>"):
-    #     events_str = log.strip("<session_event>")
-    #     events_data = json.loads(events_str)
-
-    #     print("events_data", events_data)
-
-    #     store_events(events_data)
+# potentially expose this to the users so they can pass in their own playwright browser that we can use, cdp or no cdp.
+async def create_browser(cdp_url: Optional[str] = None):
+    context_manager = async_playwright()
+    p_instance = await context_manager.start()
+    if cdp_url is None:
+        return await p_instance.chromium.launch(headless=False), context_manager
+    else:
+        return (
+            await p_instance.chromium.connect_over_cdp(cdp_url),
+            p_instance,
+        )
 
 
 class Recording(BaseModel):
     task_id: str
     events: List[Dict]
-
-    # def __init__(self, task_id: str, events: List[Dict]):
-    #     self.task_id = task_id
-    #     self.events = events
-    #     self.browser = browser
 
     def __export_json(self):
         return self.model_dump_json()
@@ -68,18 +59,36 @@ class Recording(BaseModel):
         if path.startswith("s3://"):
             self.__export_s3()
         else:
+            # create file or directory if it doesn't exist
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 f.write(self.__export_json())
 
-    def replay(self, browser: Browser):
-        # TODO: replay the recording
-        # using the browser create a new page
-        context = browser.contexts[0]
-        page = context.new_page()
+    async def replay(self, cdp_url: Optional[str] = None):
+        if self.task_id is None or len(self.events) == 0:
+            print("No recording or events found")
+            return
 
-        replay_events(page, self.events)
+        browser, p_instance = await create_browser(cdp_url)
 
-class Recorder():
+        await replay_events(browser, self.events)
+
+        await p_instance.stop()
+
+    @staticmethod
+    def from_file(path: str):
+        if path.startswith("s3://"):
+            s3 = boto3.client("s3")
+            response = s3.get_object(Bucket="foundryml-trajectory", Key=path)
+            return Recording.model_validate_json(
+                response["Body"].read().decode("utf-8")
+            )
+        else:
+            with open(path, "r") as f:
+                return Recording.model_validate_json(f.read())
+
+
+class Recorder:
     def __init__(self, cdp_url: str):
         self.cdp_url = cdp_url
 
@@ -88,23 +97,15 @@ class Recorder():
         task_id = str(uuid.uuid4())
         print(f"Task ID: {task_id}")
 
-        async with async_playwright() as p:
-            # Launch browser
-            # browser = await p.chromium.launch(headless=False, args=no_automation_args)
-
-            # Connect to the remote session
-            browser = await p.chromium.connect_over_cdp(self.cdp_url)
-            # browser = await p.chromium.connect_over_cdp("ws://127.0.0.1:59939/devtools/browser/dbe9bb61-bda3-4b92-910c-c1763beba1df")
+        try:
+            # Create browser
+            browser, p_instance = await create_browser(self.cdp_url)
 
             # Create context
             context = await browser.new_context(
-                # viewport={"width": 1280, "height": 720},
+                viewport={"width": 1280, "height": 720},
                 bypass_csp=True,
             )
-
-            context.on("console", parse_logs)
-            # context.on("message", store_events)
-            # context.on("session", store_events)
 
             events = []
 
@@ -127,9 +128,6 @@ class Recorder():
             completed_trajectory = False
 
             async def handle_close(page):
-                # handle close
-                # await context.close()
-                # await browser.close()
                 nonlocal completed_trajectory
                 completed_trajectory = True
 
@@ -137,16 +135,18 @@ class Recorder():
 
             try:
                 # Keep browser open for interaction
-                # print("Browser is ready for interaction. Press Ctrl+C to exit.")
                 while not completed_trajectory:
                     await asyncio.sleep(1)
-            finally:
-                await context.close()
-                await browser.close()
+            except Exception as e:
+                print(f"Error recording: {e}")
+
+            # close browser and context
+            await context.close()
+            await browser.close()
+            await p_instance.stop()
 
             return Recording(task_id=task_id, events=events)
-
-
-if __name__ == "__main__":
-    recording = asyncio.run(record())
-    print("recording", recording.model_dump_json())
+        except Exception as e:
+            print(f"Error recording: {e}")
+        finally:
+            await p_instance.stop()
