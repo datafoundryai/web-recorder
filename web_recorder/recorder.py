@@ -1,13 +1,10 @@
 import asyncio
 import uuid
-import json
-from playwright.async_api import async_playwright, Page, ConsoleMessage, Browser
-import os
+from playwright.async_api import async_playwright, Browser
 from pydantic import BaseModel
 from typing import List, Dict
 import boto3
 
-from scrapybara import Scrapybara
 from web_recorder.replayer import replay_events
 from web_recorder.utils import get_js_path
 
@@ -30,29 +27,9 @@ no_automation_args = [
 ]
 
 
-
-def parse_logs(log: ConsoleMessage):
-    print("recording browser logs", log)
-
-    log = log.text
-
-    # if log.startswith("<session_event>"):
-    #     events_str = log.strip("<session_event>")
-    #     events_data = json.loads(events_str)
-
-    #     print("events_data", events_data)
-
-    #     store_events(events_data)
-
-
 class Recording(BaseModel):
     task_id: str
     events: List[Dict]
-
-    # def __init__(self, task_id: str, events: List[Dict]):
-    #     self.task_id = task_id
-    #     self.events = events
-    #     self.browser = browser
 
     def __export_json(self):
         return self.model_dump_json()
@@ -79,7 +56,8 @@ class Recording(BaseModel):
 
         replay_events(page, self.events)
 
-class Recorder():
+
+class Recorder:
     def __init__(self, cdp_url: str):
         self.cdp_url = cdp_url
 
@@ -90,21 +68,15 @@ class Recorder():
 
         async with async_playwright() as p:
             # Launch browser
-            # browser = await p.chromium.launch(headless=False, args=no_automation_args)
 
             # Connect to the remote session
             browser = await p.chromium.connect_over_cdp(self.cdp_url)
-            # browser = await p.chromium.connect_over_cdp("ws://127.0.0.1:59939/devtools/browser/dbe9bb61-bda3-4b92-910c-c1763beba1df")
 
             # Create context
             context = await browser.new_context(
-                # viewport={"width": 1280, "height": 720},
+                viewport={"width": 1280, "height": 720},
                 bypass_csp=True,
             )
-
-            context.on("console", parse_logs)
-            # context.on("message", store_events)
-            # context.on("session", store_events)
 
             events = []
 
@@ -127,9 +99,6 @@ class Recorder():
             completed_trajectory = False
 
             async def handle_close(page):
-                # handle close
-                # await context.close()
-                # await browser.close()
                 nonlocal completed_trajectory
                 completed_trajectory = True
 
@@ -137,7 +106,6 @@ class Recorder():
 
             try:
                 # Keep browser open for interaction
-                # print("Browser is ready for interaction. Press Ctrl+C to exit.")
                 while not completed_trajectory:
                     await asyncio.sleep(1)
             finally:
@@ -145,8 +113,3 @@ class Recorder():
                 await browser.close()
 
             return Recording(task_id=task_id, events=events)
-
-
-if __name__ == "__main__":
-    recording = asyncio.run(record())
-    print("recording", recording.model_dump_json())
