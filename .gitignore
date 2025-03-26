@@ -1,0 +1,13 @@
+.env
+.venv
+.vscode
+.ruff_cache
+.ipynb_checkpoints
+recordings/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
