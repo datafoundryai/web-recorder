@@ -1,8 +1,9 @@
 import asyncio
+import os
 import uuid
-from playwright.async_api import async_playwright, Browser
+from playwright.async_api import async_playwright
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import boto3
 
 from web_recorder.replayer import replay_events
@@ -27,6 +28,19 @@ no_automation_args = [
 ]
 
 
+# potentially expose this to the users so they can pass in their own playwright browser that we can use, cdp or no cdp.
+async def create_browser(cdp_url: Optional[str] = None):
+    context_manager = async_playwright()
+    p_instance = await context_manager.start()
+    if cdp_url is None:
+        return await p_instance.chromium.launch(headless=False), context_manager
+    else:
+        return (
+            await p_instance.chromium.connect_over_cdp(cdp_url),
+            p_instance,
+        )
+
+
 class Recording(BaseModel):
     task_id: str
     events: List[Dict]
@@ -45,16 +59,22 @@ class Recording(BaseModel):
         if path.startswith("s3://"):
             self.__export_s3()
         else:
+            # create file or directory if it doesn't exist
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 f.write(self.__export_json())
 
-    def replay(self, browser: Browser):
-        # TODO: replay the recording
-        # using the browser create a new page
-        context = browser.contexts[0]
-        page = context.new_page()
+    async def replay(self, cdp_url: Optional[str] = None):
 
-        replay_events(page, self.events)
+        if self.task_id is None or len(self.events) == 0:
+            print("No recording or events found")
+            return
+
+        browser, p_instance = await create_browser(cdp_url)
+
+        await replay_events(browser, self.events)
+
+        await p_instance.stop()
 
 
 class Recorder:
@@ -66,11 +86,9 @@ class Recorder:
         task_id = str(uuid.uuid4())
         print(f"Task ID: {task_id}")
 
-        async with async_playwright() as p:
-            # Launch browser
-
-            # Connect to the remote session
-            browser = await p.chromium.connect_over_cdp(self.cdp_url)
+        try:
+            # Create browser
+            browser, p_instance = await create_browser(self.cdp_url)
 
             # Create context
             context = await browser.new_context(
@@ -108,8 +126,28 @@ class Recorder:
                 # Keep browser open for interaction
                 while not completed_trajectory:
                     await asyncio.sleep(1)
-            finally:
-                await context.close()
-                await browser.close()
+            except Exception as e:
+                print(f"Error recording: {e}")
+
+            # close browser and context
+            await context.close()
+            await browser.close()
+            await p_instance.stop()
 
             return Recording(task_id=task_id, events=events)
+        except Exception as e:
+            print(f"Error recording: {e}")
+        finally:
+            await p_instance.stop()
+
+    @staticmethod
+    def from_file(path: str):
+        if path.startswith("s3://"):
+            s3 = boto3.client("s3")
+            response = s3.get_object(Bucket="foundryml-trajectory", Key=path)
+            return Recording.model_validate_json(
+                response["Body"].read().decode("utf-8")
+            )
+        else:
+            with open(path, "r") as f:
+                return Recording.model_validate_json(f.read())
