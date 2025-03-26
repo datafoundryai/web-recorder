@@ -8,8 +8,8 @@ from typing import List, Dict
 import boto3
 
 from scrapybara import Scrapybara
-from web_recording.replayer import replay_events
-from web_recording.utils import get_js_path
+from web_recorder.replayer import replay_events
+from web_recorder.utils import get_js_path
 
 no_automation_args = [
     "--no-sandbox",
@@ -31,8 +31,6 @@ no_automation_args = [
 
 
 
-
-
 def parse_logs(log: ConsoleMessage):
     print("recording browser logs", log)
 
@@ -51,10 +49,10 @@ class Recording(BaseModel):
     task_id: str
     events: List[Dict]
 
-    def __init__(self, task_id: str, events: List[Dict]):
-        self.task_id = task_id
-        self.events = events
-        self.browser = browser
+    # def __init__(self, task_id: str, events: List[Dict]):
+    #     self.task_id = task_id
+    #     self.events = events
+    #     self.browser = browser
 
     def __export_json(self):
         return self.model_dump_json()

@@ -1,6 +1,6 @@
 README.md
 setup.py
-web_recording.egg-info/PKG-INFO
-web_recording.egg-info/SOURCES.txt
-web_recording.egg-info/dependency_links.txt
-web_recording.egg-info/top_level.txt
+web_recorder.egg-info/PKG-INFO
+web_recorder.egg-info/SOURCES.txt
+web_recorder.egg-info/dependency_links.txt
+web_recorder.egg-info/top_level.txt
