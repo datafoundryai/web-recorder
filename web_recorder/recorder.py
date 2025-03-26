@@ -65,7 +65,6 @@ class Recording(BaseModel):
                 f.write(self.__export_json())
 
     async def replay(self, cdp_url: Optional[str] = None):
-
         if self.task_id is None or len(self.events) == 0:
             print("No recording or events found")
             return
@@ -75,6 +74,18 @@ class Recording(BaseModel):
         await replay_events(browser, self.events)
 
         await p_instance.stop()
+
+    @staticmethod
+    def from_file(path: str):
+        if path.startswith("s3://"):
+            s3 = boto3.client("s3")
+            response = s3.get_object(Bucket="foundryml-trajectory", Key=path)
+            return Recording.model_validate_json(
+                response["Body"].read().decode("utf-8")
+            )
+        else:
+            with open(path, "r") as f:
+                return Recording.model_validate_json(f.read())
 
 
 class Recorder:
@@ -139,15 +150,3 @@ class Recorder:
             print(f"Error recording: {e}")
         finally:
             await p_instance.stop()
-
-    @staticmethod
-    def from_file(path: str):
-        if path.startswith("s3://"):
-            s3 = boto3.client("s3")
-            response = s3.get_object(Bucket="foundryml-trajectory", Key=path)
-            return Recording.model_validate_json(
-                response["Body"].read().decode("utf-8")
-            )
-        else:
-            with open(path, "r") as f:
-                return Recording.model_validate_json(f.read())
