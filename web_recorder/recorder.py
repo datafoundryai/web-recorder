@@ -1,9 +1,10 @@
 import asyncio
 import os
+from typing import List, Dict, Optional
+
 import uuid
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
-from typing import List, Dict, Optional
 import boto3
 
 from web_recorder.replayer import replay_events
@@ -28,17 +29,21 @@ no_automation_args = [
 ]
 
 
+class BrowserConfig(BaseModel):
+    cdp_url: Optional[str] = None
+    headless: bool = False
+
+
 # potentially expose this to the users so they can pass in their own playwright browser that we can use, cdp or no cdp.
-async def create_browser(cdp_url: Optional[str] = None):
+async def create_browser(config: BrowserConfig):
     context_manager = async_playwright()
     p_instance = await context_manager.start()
-    if cdp_url is None:
-        return await p_instance.chromium.launch(headless=False), context_manager
+    if config.cdp_url is None:
+        browser = await p_instance.chromium.launch(headless=config.headless)
     else:
-        return (
-            await p_instance.chromium.connect_over_cdp(cdp_url),
-            p_instance,
-        )
+        browser = await p_instance.chromium.connect_over_cdp(config.cdp_url)
+
+    return browser, p_instance
 
 
 class Recording(BaseModel):
@@ -69,7 +74,12 @@ class Recording(BaseModel):
             print("No recording or events found")
             return
 
-        browser, p_instance = await create_browser(cdp_url)
+        browser, p_instance = await create_browser(
+            BrowserConfig(
+                cdp_url=cdp_url,
+                headless=False,
+            )
+        )
 
         await replay_events(browser, self.events)
 
@@ -99,7 +109,12 @@ class Recorder:
 
         try:
             # Create browser
-            browser, p_instance = await create_browser(self.cdp_url)
+            browser, p_instance = await create_browser(
+                BrowserConfig(
+                    cdp_url=self.cdp_url,
+                    headless=True,
+                )
+            )
 
             # Create context
             context = await browser.new_context(
