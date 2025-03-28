@@ -47,6 +47,14 @@ window.stopFn = rrweb.record({
   },
 });
 
+// Add custom event for page load completion
+window.addEventListener("load", () => {
+  rrweb.record.addCustomEvent("page-load", {
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+});
+
 // Function to send events via beacon
 window.sendEventsBG = () => {
   console.log("send events bg called");
