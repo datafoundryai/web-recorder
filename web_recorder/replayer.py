@@ -45,9 +45,7 @@ async def inject_rrweb_player_js(context: BrowserContext):
 
 
 async def inject_rrweb_player_css(page: Page):
-    await page.add_style_tag(
-        path="web_recorder/rrweb/rrweb-stylesheet.css"
-    )
+    await page.add_style_tag(path="web_recorder/rrweb/rrweb-stylesheet.css")
 
 
 async def replay_events(browser: Browser, events: list):
@@ -93,6 +91,7 @@ async def replay_events(browser: Browser, events: list):
     except Exception as e:
         print(f"Error replaying events: {e}")
 
+
 async def wait_for_player(page: Page, timeout: int = 30):
     """
     Wait for the rrweb player to be available.
@@ -134,19 +133,27 @@ async def build_trajectory_snapshots(browser: Browser, events: list):
     await inject_rrweb_player_js(context)
 
     page = await context.new_page()
+    await inject_rrweb_player_css(page)
 
     try:
         await wait_for_player(page)
 
-        if not await setup_player(page, events):
+        rrweb_required_events = 2
+        if not await setup_player(page, events[:rrweb_required_events]):
             raise Exception("Player not available")
+
+        for event in events[rrweb_required_events:]:
+            await page.evaluate("([event]) => window.player.addEvent(event)", [event])
 
         dom_events = await generate_dom_events(page, events)
 
         trajectory_snapshots = [
-            create_trajectory_snapshot(event) for event in dom_events
+            snapshot
+            for event in dom_events
+            if (snapshot := create_trajectory_snapshot(event)) is not None
         ]
-        return [snapshot for snapshot in trajectory_snapshots if snapshot is not None]
+
+        return trajectory_snapshots
 
     except Exception as e:
         print(f"Error building DOM: {e}")
