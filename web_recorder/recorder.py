@@ -54,7 +54,7 @@ class ExportFormat(Enum):
 
 
 class ExportConfig(BaseModel):
-    format: ExportFormat
+    format: ExportFormat = ExportFormat.RRWEB
 
 
 class Trajectory(BaseModel):
@@ -76,7 +76,7 @@ class Recording(BaseModel):
             Body=self.__export_json(),
         )
 
-    async def export(self, path: str, config: ExportConfig):
+    async def export(self, path: str, config: ExportConfig = ExportConfig()):
         if config.format == ExportFormat.RRWEB:
             data = self.__export_json()
         elif config.format == ExportFormat.TRAJECTORY:
@@ -149,7 +149,7 @@ class Recording(BaseModel):
 
 
 class Recorder:
-    def __init__(self, cdp_url: str):
+    def __init__(self, cdp_url: Optional[str] = None):
         self.cdp_url = cdp_url
 
     async def record(self):
