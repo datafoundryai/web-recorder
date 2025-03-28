@@ -2,11 +2,18 @@ from typing import Optional
 from enum import Enum
 
 from playwright.async_api import Page
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # Event type constants
 # Refer to https://github.com/rrweb-io/rrweb/blob/master/docs/recipes/dive-into-event.md for more details
-EVENT_TYPES = {"FULL_SNAPSHOT": 2, "PAGE_INFO": 4, "INCREMENTAL_SNAPSHOT": 3}
+EVENT_TYPES = {
+    "LOADED": 0,
+    "INITAL_LOAD": 1,
+    "FULL_SNAPSHOT": 2,
+    "INCREMENTAL_SNAPSHOT": 3,
+    "META": 4,
+    "CUSTOM": 5,
+}
 
 # In these kinds of events, the incrementalSnapshotEvent is the event that contains incremental data. You can use `event.data.source` to find which kind of incremental data it belongs to:
 # Refer to https://github.com/rrweb-io/rrweb/blob/master/docs/recipes/dive-into-event.md for more details
@@ -20,6 +27,7 @@ EVENT_SOURCES = {
     "TOUCH_MOVE": 6,
     "MEDIA_INTERACTION": 7,
     "NAVIGATION": 8,
+    "PAGE_LOAD": 9,
 }
 
 interactable_sources = [
@@ -30,11 +38,13 @@ interactable_sources = [
 
 
 class EventSnapshot(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
     timestamp: int
     dom_content: str
     event_type: int
     is_user_triggered: bool
 
+    metadata: Optional[dict] = None
     element: Optional[str] = None
     event_source: Optional[int] = None
 
@@ -100,7 +110,6 @@ async def generate_event_snapshots(
     element = None
     # Go to specific timestamp
     offset = timestamp - start_timestamp
-    await page.evaluate("([event]) => window.player.addEvent(event)", [event])
     await page.evaluate("offset => window.player.goto(offset, false)", offset)
 
     # Get the iframe element
@@ -146,49 +155,81 @@ async def generate_dom_events(page: Page, events: list) -> list[EventSnapshot]:
 
     start_timestamp = events[0]["timestamp"]
 
-    page_info = None
-    for event in events:
-        if event["type"] == EVENT_TYPES["PAGE_INFO"]:
-            page_info = event
+    seen_events = set()
+    for i, event in enumerate(events):
+        event_key = f"{event['timestamp']}-{event['type']}"
+        if event_key in seen_events or event["type"] in [
+            EVENT_TYPES["LOADED"],
+            EVENT_TYPES["INITAL_LOAD"],
+        ]:
             continue
 
+        seen_events.add(event_key)
+
         snapshot = await generate_event_snapshots(page, event, start_timestamp)
+
         if snapshot is None:
             continue
 
-        if page_info is not None:
+        if event["type"] == EVENT_TYPES["META"]:
             dom_snapshots.append(
                 EventSnapshot(
-                    timestamp=snapshot.timestamp,
-                    dom_content=snapshot.dom_content,
-                    event_type=snapshot.event_type,
+                    timestamp=event["timestamp"],
+                    dom_content="",
+                    event_type=event["type"],
                     is_user_triggered=True,
-                    element=None,
                     event_source=EVENT_SOURCES["NAVIGATION"],
+                    metadata=event["data"],
                 )
             )
-            page_info = None
 
-        dom_snapshots.append(snapshot)
+        # This is a custom event that is emitted when the page is loaded from the setup_recording.js script
+        # We use this to get the initial page load snapshot once network is loaded.
+        # This works for client side rendered apps unlike standard load events from rrweb,
+        elif (
+            event["type"] == EVENT_TYPES["CUSTOM"]
+            and event["data"]["payload"]
+            and event["data"]["tag"] == "page-load"
+        ):
+            payload = event["data"]["payload"]
+
+            dom_snapshots.append(
+                EventSnapshot(
+                    timestamp=event["timestamp"],
+                    dom_content=payload["state"],
+                    event_type=event["type"],
+                    is_user_triggered=True,
+                    event_source=EVENT_SOURCES["PAGE_LOAD"],
+                    metadata={
+                        "url": payload["url"],
+                    },
+                )
+            )
+        else:
+            dom_snapshots.append(snapshot)
 
     return dom_snapshots
 
 
 class TrajectoryAction(Enum):
     CLICK = "click"
+    HOVER = "hover"
     MOUSE_MOVE = "mouse_move"
     SCROLL = "scroll"
     VIEWPORT_RESIZE = "viewport_resize"
     INPUT = "input"
     NAVIGATION = "navigation"
+    PAGE_LOAD = "page_load"
 
 
 class TrajectorySnapshot(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
     action: TrajectoryAction
     timestamp: int
     state: str
 
     element: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 def create_trajectory_snapshot(snapshot: EventSnapshot) -> Optional[TrajectorySnapshot]:
@@ -196,8 +237,15 @@ def create_trajectory_snapshot(snapshot: EventSnapshot) -> Optional[TrajectorySn
     event_source = snapshot.event_source
     element = snapshot.element
 
+    if event_source is None:
+        return None
+
     if event_source == EVENT_SOURCES["MOUSE_INTERACTION"]:
-        action = TrajectoryAction.CLICK
+        action = (
+            TrajectoryAction.HOVER
+            if element and ":hover" in element
+            else TrajectoryAction.CLICK
+        )
     elif event_source == EVENT_SOURCES["MOUSE_MOVE"]:
         action = TrajectoryAction.MOUSE_MOVE
     elif event_source == EVENT_SOURCES["SCROLL"]:
@@ -208,6 +256,8 @@ def create_trajectory_snapshot(snapshot: EventSnapshot) -> Optional[TrajectorySn
         action = TrajectoryAction.INPUT
     elif event_source == EVENT_SOURCES["NAVIGATION"]:
         action = TrajectoryAction.NAVIGATION
+    elif event_source == EVENT_SOURCES["PAGE_LOAD"]:
+        action = TrajectoryAction.PAGE_LOAD
     else:
         return None
 
@@ -216,4 +266,5 @@ def create_trajectory_snapshot(snapshot: EventSnapshot) -> Optional[TrajectorySn
         element=element,
         timestamp=snapshot.timestamp,
         state=snapshot.dom_content,
+        metadata=snapshot.metadata,
     )
