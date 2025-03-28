@@ -1,13 +1,219 @@
-from importlib import resources
+from typing import Optional
+from enum import Enum
+
+from playwright.async_api import Page
+from pydantic import BaseModel
+
+# Event type constants
+# Refer to https://github.com/rrweb-io/rrweb/blob/master/docs/recipes/dive-into-event.md for more details
+EVENT_TYPES = {"FULL_SNAPSHOT": 2, "PAGE_INFO": 4, "INCREMENTAL_SNAPSHOT": 3}
+
+# In these kinds of events, the incrementalSnapshotEvent is the event that contains incremental data. You can use `event.data.source` to find which kind of incremental data it belongs to:
+# Refer to https://github.com/rrweb-io/rrweb/blob/master/docs/recipes/dive-into-event.md for more details
+EVENT_SOURCES = {
+    "MUTATION": 0,
+    "MOUSE_MOVE": 1,
+    "MOUSE_INTERACTION": 2,
+    "SCROLL": 3,
+    "VIEWPORT_RESIZE": 4,
+    "INPUT": 5,
+    "TOUCH_MOVE": 6,
+    "MEDIA_INTERACTION": 7,
+    "NAVIGATION": 8,
+}
+
+interactable_sources = [
+    EVENT_SOURCES["INPUT"],
+    EVENT_SOURCES["MOUSE_INTERACTION"],
+    EVENT_SOURCES["MEDIA_INTERACTION"],
+]
 
 
-def get_js_path(js_filename):
-    """Get path to a JS file in the package."""
-    try:
-        # For Python 3.9+
-        with resources.files("web_recorder.rrweb").joinpath(js_filename) as path:
-            return str(path)
-    except Exception:
-        # For older Python versions
-        with resources.path("web_recorder.rrweb", js_filename) as path:
-            return str(path)
+class EventSnapshot(BaseModel):
+    timestamp: int
+    dom_content: str
+    event_type: int
+    is_user_triggered: bool
+
+    element: Optional[str] = None
+    event_source: Optional[int] = None
+
+
+async def generate_event_snapshots(
+    page: Page, event: dict, start_timestamp: int
+) -> Optional[EventSnapshot]:
+    """
+    Generates a snapshot of the DOM state at a specific event timestamp during web recording replay.
+
+    This function:
+    1. Adds the event to the rrweb player
+    2. Navigates to the specific timestamp
+    3. Captures the DOM state from the replayer iframe
+    4. For interactive events (clicks, inputs, etc.), captures the specific element that was interacted with
+
+    Args:
+        page (Page): Playwright page object containing the rrweb replayer
+        event (dict): rrweb event object containing:
+            - type: Event type (e.g., FULL_SNAPSHOT, INCREMENTAL_SNAPSHOT)
+            - timestamp: When the event occurred
+            - data: Event-specific data including:
+                - source: Type of interaction (e.g., MOUSE_INTERACTION, INPUT)
+                - id: Node ID for interactive events
+                - userTriggered: Whether event was triggered by user
+        start_timestamp (int): Base timestamp to calculate offset from
+
+    Returns:
+        EventSnapshot: EventSnapshot containing:
+            - timestamp: When the event occurred
+            - dom_content: HTML snapshot of the page state
+            - event_type: Type of rrweb event
+            - element: HTML of the interacted element (if applicable)
+            - is_user_triggered: Whether event was user-initiated
+            - event_source: Type of interaction
+        None: If snapshot cannot be generated (e.g., invalid iframe state)
+
+    Example:
+        ```python
+        # Example event object
+        event = {
+            "type": 3,  # INCREMENTAL_SNAPSHOT
+            "timestamp": 1234567890,
+            "data": {
+                "source": 2,  # MOUSE_INTERACTION
+                "id": 42,
+                "userTriggered": True
+            }
+        }
+
+        # Generate snapshot
+        snapshot = await generate_event_snapshots(page, event, start_timestamp=1234567000)
+
+        # Access snapshot data
+        print(snapshot["dom_content"])  # HTML of the page
+        print(snapshot["element"])      # HTML of clicked element
+        ```
+    """
+    is_user_triggered = event["data"].get("userTriggered", False)
+    event_type = event["type"]
+    event_source = event["data"].get("source")
+    timestamp = event["timestamp"]
+    element = None
+    # Go to specific timestamp
+    offset = timestamp - start_timestamp
+    await page.evaluate("([event]) => window.player.addEvent(event)", [event])
+    await page.evaluate("offset => window.player.goto(offset, false)", offset)
+
+    # Get the iframe element
+    iframe = await page.query_selector(".replayer-wrapper > iframe")
+    if not iframe:
+        return None
+
+    # Get the frame content
+    frame = await iframe.content_frame()
+    if not frame:
+        return None
+
+    snapshot = await frame.content()
+
+    if (
+        snapshot is None
+        or snapshot.strip() == ""
+        or snapshot.startswith('<html class="rrweb-paused"><head></head>')
+    ):
+        return None
+
+    # Get the element that was interacted with
+    if event_source in interactable_sources:
+        node_id = event["data"].get("id", None)
+        if node_id is not None:
+            with open("web_recorder/js/get_rrweb_dom_node.js", "r") as f:
+                js_code = f.read()
+            element = await page.evaluate(js_code, [node_id, event_source])
+
+    return EventSnapshot(
+        timestamp=timestamp,
+        dom_content=snapshot,
+        event_type=event_type,
+        element=element,
+        is_user_triggered=is_user_triggered,
+        event_source=event_source,
+    )
+
+
+async def generate_dom_events(page: Page, events: list) -> list[EventSnapshot]:
+    """Collect DOM snapshots for each event"""
+    dom_snapshots = []
+
+    start_timestamp = events[0]["timestamp"]
+
+    page_info = None
+    for event in events:
+        if event["type"] == EVENT_TYPES["PAGE_INFO"]:
+            page_info = event
+            continue
+
+        snapshot = await generate_event_snapshots(page, event, start_timestamp)
+        if snapshot is None:
+            continue
+
+        if page_info is not None:
+            dom_snapshots.append(
+                EventSnapshot(
+                    timestamp=snapshot.timestamp,
+                    dom_content=snapshot.dom_content,
+                    event_type=snapshot.event_type,
+                    is_user_triggered=True,
+                    element=None,
+                    event_source=EVENT_SOURCES["NAVIGATION"],
+                )
+            )
+            page_info = None
+
+        dom_snapshots.append(snapshot)
+
+    return dom_snapshots
+
+
+class TrajectoryAction(Enum):
+    CLICK = "click"
+    MOUSE_MOVE = "mouse_move"
+    SCROLL = "scroll"
+    VIEWPORT_RESIZE = "viewport_resize"
+    INPUT = "input"
+    NAVIGATION = "navigation"
+
+
+class TrajectorySnapshot(BaseModel):
+    action: TrajectoryAction
+    timestamp: int
+    state: str
+
+    element: Optional[str] = None
+
+
+def create_trajectory_snapshot(snapshot: EventSnapshot) -> Optional[TrajectorySnapshot]:
+    """Create a trajectory from an event snapshot"""
+    event_source = snapshot.event_source
+    element = snapshot.element
+
+    if event_source == EVENT_SOURCES["MOUSE_INTERACTION"]:
+        action = TrajectoryAction.CLICK
+    elif event_source == EVENT_SOURCES["MOUSE_MOVE"]:
+        action = TrajectoryAction.MOUSE_MOVE
+    elif event_source == EVENT_SOURCES["SCROLL"]:
+        action = TrajectoryAction.SCROLL
+    elif event_source == EVENT_SOURCES["VIEWPORT_RESIZE"]:
+        action = TrajectoryAction.VIEWPORT_RESIZE
+    elif event_source == EVENT_SOURCES["INPUT"]:
+        action = TrajectoryAction.INPUT
+    elif event_source == EVENT_SOURCES["NAVIGATION"]:
+        action = TrajectoryAction.NAVIGATION
+    else:
+        return None
+
+    return TrajectorySnapshot(
+        action=action,
+        element=element,
+        timestamp=snapshot.timestamp,
+        state=snapshot.dom_content,
+    )
