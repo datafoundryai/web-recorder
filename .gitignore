@@ -1,9 +1,11 @@
+.DS_Store
 .env
 .venv
 .vscode
 .ruff_cache
 .ipynb_checkpoints
 recordings/
+trajectories/
 __pycache__/
 *.pyc
 *.pyo
