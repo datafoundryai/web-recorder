@@ -1,13 +1,16 @@
 import asyncio
+import json
 import os
+from typing import List, Dict, Optional
+from enum import Enum
+
 import uuid
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
-from typing import List, Dict, Optional
 import boto3
 
-from web_recorder.replayer import replay_events
-from web_recorder.utils import get_js_path
+from web_recorder.replayer import replay_events, build_trajectory_snapshots
+from web_recorder.utils import TrajectorySnapshot
 
 no_automation_args = [
     "--no-sandbox",
@@ -28,17 +31,35 @@ no_automation_args = [
 ]
 
 
+class BrowserConfig(BaseModel):
+    cdp_url: Optional[str] = None
+    headless: bool = False
+
+
 # potentially expose this to the users so they can pass in their own playwright browser that we can use, cdp or no cdp.
-async def create_browser(cdp_url: Optional[str] = None):
+async def create_browser(config: BrowserConfig):
     context_manager = async_playwright()
     p_instance = await context_manager.start()
-    if cdp_url is None:
-        return await p_instance.chromium.launch(headless=False), context_manager
+    if config.cdp_url is None:
+        browser = await p_instance.chromium.launch(headless=config.headless)
     else:
-        return (
-            await p_instance.chromium.connect_over_cdp(cdp_url),
-            p_instance,
-        )
+        browser = await p_instance.chromium.connect_over_cdp(config.cdp_url)
+
+    return browser, p_instance
+
+
+class ExportFormat(Enum):
+    RRWEB = "rrweb"
+    TRAJECTORY = "trajectory"
+
+
+class ExportConfig(BaseModel):
+    format: ExportFormat = ExportFormat.RRWEB
+
+
+class Trajectory(BaseModel):
+    id: str
+    snapshots: List[TrajectorySnapshot]
 
 
 class Recording(BaseModel):
@@ -55,25 +76,64 @@ class Recording(BaseModel):
             Body=self.__export_json(),
         )
 
-    def export(self, path: str):
+    async def export(self, path: str, config: ExportConfig = ExportConfig()):
+        if config.format == ExportFormat.RRWEB:
+            data = self.__export_json()
+        elif config.format == ExportFormat.TRAJECTORY:
+            trajectory_snapshots = await self.__build_trajectory_snapshots()
+            data = Trajectory(
+                id=self.task_id,
+                snapshots=[snapshot.model_dump() for snapshot in trajectory_snapshots],
+            ).model_dump_json()
+
         if path.startswith("s3://"):
             self.__export_s3()
         else:
             # create file or directory if it doesn't exist
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
-                f.write(self.__export_json())
+                f.write(data)
+
+        print("Successfully exported recording")
 
     async def replay(self, cdp_url: Optional[str] = None):
         if self.task_id is None or len(self.events) == 0:
             print("No recording or events found")
             return
 
-        browser, p_instance = await create_browser(cdp_url)
+        browser, p_instance = await create_browser(
+            BrowserConfig(
+                cdp_url=cdp_url,
+                headless=False,
+            )
+        )
 
         await replay_events(browser, self.events)
 
         await p_instance.stop()
+
+        print("Replay completed")
+
+    async def get_trajectory(self):
+        trajectory_snapshots = await self.__build_trajectory_snapshots()
+
+        return Trajectory(
+            id=self.task_id,
+            snapshots=trajectory_snapshots,
+        )
+
+    async def __build_trajectory_snapshots(self):
+        browser, p_instance = await create_browser(
+            BrowserConfig(
+                headless=True,
+            )
+        )
+
+        trajectory_snapshots = await build_trajectory_snapshots(browser, self.events)
+
+        await p_instance.stop()
+
+        return trajectory_snapshots
 
     @staticmethod
     def from_file(path: str):
@@ -89,7 +149,7 @@ class Recording(BaseModel):
 
 
 class Recorder:
-    def __init__(self, cdp_url: str):
+    def __init__(self, cdp_url: Optional[str] = None):
         self.cdp_url = cdp_url
 
     async def record(self):
@@ -99,7 +159,12 @@ class Recorder:
 
         try:
             # Create browser
-            browser, p_instance = await create_browser(self.cdp_url)
+            browser, p_instance = await create_browser(
+                BrowserConfig(
+                    cdp_url=self.cdp_url,
+                    headless=False,
+                )
+            )
 
             # Create context
             context = await browser.new_context(
@@ -117,11 +182,11 @@ class Recorder:
             await context.expose_function("store_events", store_events)
 
             # Inject rrweb and recording scripts
-            await context.add_init_script(path=get_js_path("rrweb.js"))
+            await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
             # custom code that injects task id and sets up recording
             await context.add_init_script(script=f"window.taskId = '{task_id}';")
             await context.add_init_script(
-                path=get_js_path("setup_recording.js"),
+                path="web_recorder/rrweb/setup_recording.js",
             )
             # Create new page
             page = await context.new_page()
@@ -144,6 +209,8 @@ class Recorder:
             await context.close()
             await browser.close()
             await p_instance.stop()
+
+            print("Recording completed")
 
             return Recording(task_id=task_id, events=events)
         except Exception as e:

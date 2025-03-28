@@ -1,50 +1,19 @@
 import asyncio
-from playwright.async_api import Page, Browser
+import time
 
+from playwright.async_api import Page, Browser, BrowserContext
 
-async def inject_rrweb_player(page: Page):
-    if page.is_closed():
-        return
-
-    # check if rrweb-player is already injected
-    is_player_available = await page.evaluate("typeof rrwebPlayer !== 'undefined'")
-    if is_player_available:
-        return
-
-    await page.add_style_tag(
-        url="https://cdn.jsdelivr.net/npm/rrweb-player@2.0.0-alpha.18/dist/style.css"
-    )
-    await page.add_script_tag(path="web_recorder/rrweb/rrweb-player.js")
-
-    try:
-        await page.wait_for_load_state("networkidle")
-    except Exception as e:
-        print(f"Warning: Unable to wait for network idle: {e}")
-
-    # Verify rrweb-player is available
-    max_retries = 3
-    retries = 0
-    while retries < max_retries:
-        is_player_available = await page.evaluate("typeof rrwebPlayer !== 'undefined'")
-        if is_player_available:
-            break
-        retries += 1
-        await asyncio.sleep(1)
-    if not is_player_available:
-        raise Exception("rrweb-player failed to load properly")
+from web_recorder.utils import (
+    generate_dom_events,
+    create_trajectory_snapshot,
+)
 
 
 async def setup_player(page: Page, events: list):
     # check if player is already setup
     is_player_available = await page.evaluate("typeof player !== 'undefined'")
     if is_player_available:
-        return
-
-    print("number of events", len(events))
-
-    # player requires at least 2 events to start
-    # Can't send all events because if we have a lot of events during init, the player freezes.
-    required_events = 2
+        return False
 
     await page.evaluate(
         """
@@ -58,66 +27,49 @@ async def setup_player(page: Page, events: list):
                     autoPlay: false,
                     showWarning: true,
                     mouseTail: false,
-                    useVirtualDom: true
+                    useVirtualDom: true,
                 }
             });
             window.player = player;
         }
     """,
-        [events[:required_events]],
+        [events],
     )
+
+    return True
+
+
+async def inject_rrweb_player_js(context: BrowserContext):
+    await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
+    await context.add_init_script(path="web_recorder/rrweb/rrweb-player.js")
+
+
+async def inject_rrweb_player_css(page: Page):
+    await page.add_style_tag(path="web_recorder/rrweb/rrweb-stylesheet.css")
 
 
 async def replay_events(browser: Browser, events: list):
     # fix event timestamps
-    events = fix_event_timestamps(events)
-
     try:
         context = await browser.new_context(
             bypass_csp=True,
         )
+
+        await inject_rrweb_player_js(context)
+
         page = await context.new_page()
-
-        # Setup rrweb injection on navigation
-        async def handle_navigation():
-            try:
-                player_available = await page.evaluate("typeof player !== 'undefined'")
-                if player_available:
-                    return
-
-                # Inject rrweb player
-                await inject_rrweb_player(page)
-                # Setup player
-                await setup_player(page, events)
-
-                print("rrweb player setup after navigation")
-            except Exception as e:
-                print(f"Error setting up rrweb player after navigation: {e}")
-
-        def handle_navigation_wrapper():
-            tasks = [
-                t for t in asyncio.all_tasks() if t.get_name() == "inject_rrweb_player"
-            ]
-            if not tasks:
-                task = asyncio.create_task(
-                    handle_navigation(), name="inject_rrweb_player"
-                )
-                task.add_done_callback(
-                    lambda t: t.exception()
-                    and print(f"Error in rrweb injection: {t.exception()}")
-                )
-
-        # Listen for frame navigation events
-        page.on("framenavigated", handle_navigation_wrapper)
-        page.on("load", handle_navigation_wrapper)
-        page.on("domcontentloaded", handle_navigation_wrapper)
+        await inject_rrweb_player_css(page)
 
         # Initial setup
-        await inject_rrweb_player(page)
-        await setup_player(page, events[:2])
+        await wait_for_player(page)
+
+        # player requires at least 2 events to start
+        # Can't send all events because if we have a lot of events during init, the player freezes.
+        rrweb_required_events = 2
+        await setup_player(page, events[:rrweb_required_events])
 
         # Add remaining events
-        for event in events[2:]:
+        for event in events[rrweb_required_events:]:
             await page.evaluate("([event]) => window.player.addEvent(event)", [event])
 
         await page.evaluate("() => window.player.play()")
@@ -140,9 +92,71 @@ async def replay_events(browser: Browser, events: list):
         print(f"Error replaying events: {e}")
 
 
-def fix_event_timestamps(events: list):
-    """Fix event timestamps to not have duplicates"""
-    for i in range(1, len(events)):
-        if events[i]["timestamp"] == events[i - 1]["timestamp"]:
-            events[i]["timestamp"] = events[i - 1]["timestamp"] + 1
-    return events
+async def wait_for_player(page: Page, timeout: int = 30):
+    """
+    Wait for the rrweb player to be available.
+    This is a helper function to wait for the player to be available before
+    setting up the player.
+
+    Args:
+        page: The page to wait for the player on.
+        timeout: The timeout for the player to be available in seconds.
+
+    Raises:
+        Exception: If the player is not available after the timeout.
+
+    Returns:
+        None
+    """
+    start_time = time.time()
+    while True:
+        rrweb_player_available = await page.evaluate(
+            "typeof rrwebPlayer !== 'undefined'"
+        )
+        if rrweb_player_available:
+            break
+
+        await asyncio.sleep(1)
+
+        if time.time() - start_time > timeout:
+            raise Exception("Player not available after timeout")
+
+
+async def build_trajectory_snapshots(browser: Browser, events: list):
+    """Build the DOM for the events and generate trajectory snapshots"""
+
+    # Create context and page
+    context = await browser.new_context(
+        bypass_csp=True,
+    )
+
+    await inject_rrweb_player_js(context)
+
+    page = await context.new_page()
+    await inject_rrweb_player_css(page)
+
+    try:
+        await wait_for_player(page)
+
+        rrweb_required_events = 2
+        if not await setup_player(page, events[:rrweb_required_events]):
+            raise Exception("Player not available")
+
+        for event in events[rrweb_required_events:]:
+            await page.evaluate("([event]) => window.player.addEvent(event)", [event])
+
+        dom_events = await generate_dom_events(page, events)
+
+        trajectory_snapshots = [
+            snapshot
+            for event in dom_events
+            if (snapshot := create_trajectory_snapshot(event)) is not None
+        ]
+
+        return trajectory_snapshots
+
+    except Exception as e:
+        print(f"Error building DOM: {e}")
+        raise e
+    finally:
+        await context.close()
