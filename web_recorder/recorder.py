@@ -66,28 +66,45 @@ class Recording(BaseModel):
     task_id: str
     events: List[Dict]
 
-    def __export_json(self):
-        return self.model_dump_json()
+    def __export_jsonl(self):
+        # Write metadata as first line
+        metadata = {"task_id": self.task_id}
+        # Write each event on a new line
+        return "\n".join(
+            [json.dumps(metadata), *[json.dumps(event) for event in self.events]]
+        )
 
-    def __export_s3(self):
+    def __export_s3(self, path: str):
         s3 = boto3.client("s3")
+        # Always use jsonl format regardless of file extension
+        key = path.replace("s3://", "")
         s3.put_object(
-            Key=f"recording_{self.task_id}.json",
-            Body=self.__export_json(),
+            Key=key,
+            Body=self.__export_jsonl(),
+        )
+
+    def __export_trajectory_jsonl(self, snapshots: List[TrajectorySnapshot]):
+        return "\n".join(
+            [
+                json.dumps({"task_id": self.task_id}),
+                *[
+                    snapshot.model_dump_json(exclude_none=True, exclude_unset=True)
+                    for snapshot in snapshots
+                ],
+            ]
         )
 
     async def export(self, path: str, config: ExportConfig = ExportConfig()):
         if config.format == ExportFormat.RRWEB:
-            data = self.__export_json()
+            data = self.__export_jsonl()
         elif config.format == ExportFormat.TRAJECTORY:
             trajectory_snapshots = await self.__build_trajectory_snapshots()
-            data = Trajectory(
-                id=self.task_id,
-                snapshots=[snapshot.model_dump() for snapshot in trajectory_snapshots],
-            ).model_dump_json()
+            data = self.__export_trajectory_jsonl(trajectory_snapshots)
+        else:
+            data = self.__export_jsonl()
 
         if path.startswith("s3://"):
-            self.__export_s3()
+            self.__export_s3(path)
         else:
             # create file or directory if it doesn't exist
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -140,12 +157,23 @@ class Recording(BaseModel):
         if path.startswith("s3://"):
             s3 = boto3.client("s3")
             response = s3.get_object(Bucket="foundryml-trajectory", Key=path)
-            return Recording.model_validate_json(
-                response["Body"].read().decode("utf-8")
-            )
+            content = response["Body"].read().decode("utf-8")
         else:
             with open(path, "r") as f:
-                return Recording.model_validate_json(f.read())
+                content = f.read()
+
+        # Parse JSONL format
+        lines = content.strip().split("\n")
+        # First line should contain task_id
+        metadata = json.loads(lines[0])
+        if "task_id" in metadata:
+            task_id = metadata["task_id"]
+            events = [json.loads(line) for line in lines[1:]]
+            return Recording(task_id=task_id, events=events)
+
+        raise ValueError(
+            "Invalid recording format: expected JSONL with task_id in first line"
+        )
 
 
 class Recorder:
