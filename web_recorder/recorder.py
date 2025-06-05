@@ -1,11 +1,11 @@
 import asyncio
 import json
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from enum import Enum
 
 import uuid
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, BrowserContext
 from pydantic import BaseModel
 import boto3
 
@@ -176,6 +176,28 @@ class Recording(BaseModel):
         )
 
 
+class InjectOptions(BaseModel):
+    task_id: str
+    on_event: Callable[[Dict], None]
+
+
+async def inject_recorder(context: BrowserContext, options: InjectOptions):
+    # Inject rrweb and recording scripts
+    await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
+    # custom code that injects task id and sets up recording
+    await context.add_init_script(script=f"window.taskId = '{options.task_id}';")
+    await context.add_init_script(
+        path="web_recorder/js/setup_recording.js",
+    )
+
+    if options.on_event:
+        await setup_event_handler(context, options.on_event)
+
+
+async def setup_event_handler(context: BrowserContext, on_event: Callable):
+    await context.expose_function("store_events", on_event)
+
+
 class Recorder:
     def __init__(self, cdp_url: Optional[str] = None):
         self.cdp_url = cdp_url
@@ -207,14 +229,8 @@ class Recorder:
                 if data["events"]:
                     events.extend(data["events"])
 
-            await context.expose_function("store_events", store_events)
-
-            # Inject rrweb and recording scripts
-            await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
-            # custom code that injects task id and sets up recording
-            await context.add_init_script(script=f"window.taskId = '{task_id}';")
-            await context.add_init_script(
-                path="web_recorder/rrweb/setup_recording.js",
+            await inject_recorder(
+                context, InjectOptions(task_id=task_id, on_event=store_events)
             )
             # Create new page
             page = await context.new_page()

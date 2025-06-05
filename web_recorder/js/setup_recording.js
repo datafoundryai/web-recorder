@@ -39,21 +39,15 @@ window.stopFn = rrweb.record({
   emit(event) {
     window.events.push(event);
   },
+  slimDOMOptions: {
+    comment: true,
+  },
   userTriggeredOnInput: true,
-  inlineImages: false,
+  inlineImages: true,
   inlineStylesheet: true,
   maskInputOptions: {
     password: false,
   },
-});
-
-// Add custom event for page load completion
-window.addEventListener("load", () => {
-  rrweb.record.addCustomEvent("page-load", {
-    url: window.location.href,
-    timestamp: Date.now(),
-    state: document.documentElement.outerHTML,
-  });
 });
 
 // Function to send events via beacon
