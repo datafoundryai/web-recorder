@@ -5,6 +5,7 @@
 .ruff_cache
 .ipynb_checkpoints
 recordings/
+build/
 trajectories/
 __pycache__/
 *.pyc
