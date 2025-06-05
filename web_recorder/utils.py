@@ -7,12 +7,11 @@ from pydantic import BaseModel, ConfigDict
 # Event type constants
 # Refer to https://github.com/rrweb-io/rrweb/blob/master/docs/recipes/dive-into-event.md for more details
 EVENT_TYPES = {
-    "LOADED": 0,
-    "INITAL_LOAD": 1,
+    "DOM_CONTENT_LOADED": 0,
+    "PAGE_LOADED": 1,
     "FULL_SNAPSHOT": 2,
     "INCREMENTAL_SNAPSHOT": 3,
     "META": 4,
-    "CUSTOM": 5,
 }
 
 # In these kinds of events, the incrementalSnapshotEvent is the event that contains incremental data. You can use `event.data.source` to find which kind of incremental data it belongs to:
@@ -49,7 +48,7 @@ class EventSnapshot(BaseModel):
     event_source: Optional[int] = None
 
 
-async def generate_event_snapshots(
+async def generate_event_snapshot(
     page: Page, event: dict, start_timestamp: int
 ) -> Optional[EventSnapshot]:
     """
@@ -96,7 +95,7 @@ async def generate_event_snapshots(
         }
 
         # Generate snapshot
-        snapshot = await generate_event_snapshots(page, event, start_timestamp=1234567000)
+        snapshot = await generate_event_snapshot(page, event, start_timestamp=1234567000)
 
         # Access snapshot data
         print(snapshot["dom_content"])  # HTML of the page
@@ -151,28 +150,30 @@ async def generate_event_snapshots(
 
 async def generate_dom_events(page: Page, events: list) -> list[EventSnapshot]:
     """Collect DOM snapshots for each event"""
-    dom_snapshots = []
-
+    dom_events = []
     start_timestamp = events[0]["timestamp"]
-
     seen_events = set()
+
+    # Track page load state
+    page_load = None
+    current_meta = None
+
     for i, event in enumerate(events):
         event_key = f"{event['timestamp']}-{event['type']}"
-        if event_key in seen_events or event["type"] in [
-            EVENT_TYPES["LOADED"],
-            EVENT_TYPES["INITAL_LOAD"],
-        ]:
+        if event_key in seen_events:
             continue
 
         seen_events.add(event_key)
 
-        snapshot = await generate_event_snapshots(page, event, start_timestamp)
-
-        if snapshot is None:
+        # Handle PAGE_LOADED event
+        if event["type"] == EVENT_TYPES["PAGE_LOADED"]:
+            page_load = event
             continue
 
+        # Handle META event
         if event["type"] == EVENT_TYPES["META"]:
-            dom_snapshots.append(
+            current_meta = event
+            dom_events.append(
                 EventSnapshot(
                     timestamp=event["timestamp"],
                     dom_content="",
@@ -182,33 +183,34 @@ async def generate_dom_events(page: Page, events: list) -> list[EventSnapshot]:
                     metadata=event["data"],
                 )
             )
+            continue
 
-        # This is a custom event that is emitted when the page is loaded from the setup_recording.js script
-        # We use this to get the initial page load snapshot once network is loaded.
-        # This works for client side rendered apps unlike standard load events from rrweb,
-        elif (
-            event["type"] == EVENT_TYPES["CUSTOM"]
-            and event["data"]["payload"]
-            and event["data"]["tag"] == "page-load"
-        ):
-            payload = event["data"]["payload"]
+        # Handle FULL_SNAPSHOT event
+        if event["type"] == EVENT_TYPES["FULL_SNAPSHOT"]:
+            if page_load and current_meta:
+                # Use generate_event_snapshot to get proper dom_content
+                snapshot = await generate_event_snapshot(page, event, start_timestamp)
+                if snapshot is not None:
+                    dom_events.append(
+                        EventSnapshot(
+                            timestamp=page_load["timestamp"],
+                            dom_content=snapshot.dom_content,
+                            event_type=event["type"],
+                            is_user_triggered=True,
+                            event_source=EVENT_SOURCES["PAGE_LOAD"],
+                            metadata=current_meta["data"],
+                        )
+                    )
+                page_load = None
+                current_meta = None
+            continue
 
-            dom_snapshots.append(
-                EventSnapshot(
-                    timestamp=event["timestamp"],
-                    dom_content=payload["state"],
-                    event_type=event["type"],
-                    is_user_triggered=True,
-                    event_source=EVENT_SOURCES["PAGE_LOAD"],
-                    metadata={
-                        "url": payload["url"],
-                    },
-                )
-            )
-        else:
-            dom_snapshots.append(snapshot)
+        # Handle other events
+        snapshot = await generate_event_snapshot(page, event, start_timestamp)
+        if snapshot is not None:
+            dom_events.append(snapshot)
 
-    return dom_snapshots
+    return dom_events
 
 
 class TrajectoryAction(Enum):
