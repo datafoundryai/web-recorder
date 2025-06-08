@@ -40,12 +40,12 @@ async def setup_player(page: Page, events: list):
 
 
 async def inject_rrweb_player_js(context: BrowserContext):
-    await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
-    await context.add_init_script(path="web_recorder/rrweb/rrweb-player.js")
+    await context.add_init_script(path="./rrweb/rrweb.js")
+    await context.add_init_script(path="./rrweb/rrweb-player.js")
 
 
 async def inject_rrweb_player_css(page: Page):
-    await page.add_style_tag(path="web_recorder/rrweb/rrweb-stylesheet.css")
+    await page.add_style_tag(path="./rrweb/rrweb-stylesheet.css")
 
 
 async def replay_events(browser: Browser, events: list):

@@ -8,7 +8,7 @@ setup(
     description="A package for recording, storing, and replaying web interactions",
     packages=find_packages(),
     package_data={
-        "web_recorder": ["rrweb/*.js"],
+        "web_recorder": ["rrweb/*.js", "js/*.js", "rrweb/*.css"],
     },
     include_package_data=True,
 )

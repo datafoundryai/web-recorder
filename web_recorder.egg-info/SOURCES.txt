@@ -1,7 +1,16 @@
 LICENSE
 README.md
 setup.py
+web_recorder/__init__.py
+web_recorder/recorder.py
+web_recorder/replayer.py
+web_recorder/utils.py
 web_recorder.egg-info/PKG-INFO
 web_recorder.egg-info/SOURCES.txt
 web_recorder.egg-info/dependency_links.txt
 web_recorder.egg-info/top_level.txt
+web_recorder/js/get_rrweb_dom_node.js
+web_recorder/js/setup_recording.js
+web_recorder/rrweb/rrweb-player.js
+web_recorder/rrweb/rrweb-stylesheet.css
+web_recorder/rrweb/rrweb.js

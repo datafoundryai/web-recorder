@@ -6,8 +6,10 @@ from enum import Enum
 
 import uuid
 from playwright.async_api import async_playwright, BrowserContext
+from playwright.sync_api import BrowserContext as BrowserContextSync
 from pydantic import BaseModel
 import boto3
+from importlib import resources
 
 from web_recorder.replayer import replay_events, build_trajectory_snapshots
 from web_recorder.utils import TrajectorySnapshot
@@ -180,23 +182,35 @@ class InjectOptions(BaseModel):
     task_id: str
     on_event: Callable[[Dict], None]
 
+def setup_event_handler_sync(context: BrowserContextSync, on_event: Callable):
+    context.expose_function("store_events", on_event)
+    context.expose_function("store_events_sync", on_event)
 
-async def inject_recorder(context: BrowserContext, options: InjectOptions):
-    # Inject rrweb and recording scripts
-    await context.add_init_script(path="web_recorder/rrweb/rrweb.js")
-    # custom code that injects task id and sets up recording
-    await context.add_init_script(script=f"window.taskId = '{options.task_id}';")
-    await context.add_init_script(
-        path="web_recorder/js/setup_recording.js",
-    )
+def inject_recorder_sync(context: BrowserContextSync, options: InjectOptions):
+    rrweb_js = resources.read_text("web_recorder.rrweb", "rrweb.js")
+    setup_recording_js = resources.read_text("web_recorder.js", "setup_recording.js")
+
+    context.add_init_script(script=rrweb_js)
+    context.add_init_script(script=f"window.taskId = '{options.task_id}';")
+    context.add_init_script(script=setup_recording_js)
 
     if options.on_event:
-        await setup_event_handler(context, options.on_event)
-
+        setup_event_handler_sync(context, options.on_event)
 
 async def setup_event_handler(context: BrowserContext, on_event: Callable):
     await context.expose_function("store_events", on_event)
 
+async def inject_recorder(context: BrowserContext, options: InjectOptions):
+    # Inject rrweb and recording scripts
+    rrweb_js = resources.read_text("web_recorder.rrweb", "rrweb.js")
+    setup_recording_js = resources.read_text("web_recorder.js", "setup_recording.js")
+    await context.add_init_script(script=rrweb_js)
+    # custom code that injects task id and sets up recording
+    await context.add_init_script(script=f"window.taskId = '{options.task_id}';")
+    await context.add_init_script(script=setup_recording_js)
+
+    if options.on_event:
+        await setup_event_handler(context, options.on_event)
 
 class Recorder:
     def __init__(self, cdp_url: Optional[str] = None):
