@@ -182,9 +182,11 @@ class InjectOptions(BaseModel):
     task_id: str
     on_event: Callable[[Dict], None]
 
+
 def setup_event_handler_sync(context: BrowserContextSync, on_event: Callable):
     context.expose_function("store_events", on_event)
     context.expose_function("store_events_sync", on_event)
+
 
 def inject_recorder_sync(context: BrowserContextSync, options: InjectOptions):
     rrweb_js = resources.read_text("web_recorder.rrweb", "rrweb.js")
@@ -197,13 +199,17 @@ def inject_recorder_sync(context: BrowserContextSync, options: InjectOptions):
     if options.on_event:
         setup_event_handler_sync(context, options.on_event)
 
+
 async def setup_event_handler(context: BrowserContext, on_event: Callable):
     await context.expose_function("store_events", on_event)
+
 
 async def inject_recorder(context: BrowserContext, options: InjectOptions):
     # Inject rrweb and recording scripts
     rrweb_js = resources.read_text("web_recorder.rrweb", "rrweb.js")
+    packer_js = resources.read_text("web_recorder.rrweb", "packer.js")
     setup_recording_js = resources.read_text("web_recorder.js", "setup_recording.js")
+    await context.add_init_script(script=packer_js)
     await context.add_init_script(script=rrweb_js)
     # custom code that injects task id and sets up recording
     await context.add_init_script(script=f"window.taskId = '{options.task_id}';")
@@ -211,6 +217,7 @@ async def inject_recorder(context: BrowserContext, options: InjectOptions):
 
     if options.on_event:
         await setup_event_handler(context, options.on_event)
+
 
 class Recorder:
     def __init__(self, cdp_url: Optional[str] = None):

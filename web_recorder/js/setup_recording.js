@@ -39,6 +39,7 @@ window.stopFn = rrweb.record({
   emit(event) {
     window.events.push(event);
   },
+  packFn: pack,
   slimDOMOptions: {
     comment: true,
   },
